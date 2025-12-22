@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func main() {
@@ -25,7 +26,7 @@ func promptForInput() string {
 		fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
 		return ""
 	}
-	return input
+	return strings.TrimSpace(input)
 }
 
 // parseInput is a stub function that will parse the input string
