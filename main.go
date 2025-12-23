@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -67,6 +68,12 @@ func main() {
 	dominoes := parseDominoes(input)
 	// Keep track of  moves, we are finally ready to solve the puzzle
 	moveQueue := make(MoveQueue, 0)
+	fmt.Println("Solving...")
+	startTime := time.Now()
+	defer func() {
+		elapsed := time.Since(startTime)
+		fmt.Printf("Solved in %dms\n", elapsed.Milliseconds())
+	}()
 
 	// Pick a restricted square to start with
 	emptySquare := pickEmptySquare(grid)
@@ -77,7 +84,8 @@ func main() {
 	}
 
 	fmt.Println("Solution found!")
-	fmt.Println(moveQueue)
+	moveQueue.PruneUselessMoves()
+	fmt.Println(&moveQueue)
 }
 
 func makeNextMove(grid [][]*GridSquare, dominoes DominoSet, moveQueue *MoveQueue, emptySquare *GridSquare) (success bool) {
@@ -115,6 +123,21 @@ func makeNextMove(grid [][]*GridSquare, dominoes DominoSet, moveQueue *MoveQueue
 			}()
 		}
 		for i := 0; i < numIterations; i++ {
+			// if we are on the 4th iteration, it means we have rotated about one square already and must swap to rotate about the other before disqualifying this candidate
+			if i == 4 {
+				move := &Move{
+					Label:      fmt.Sprintf("Swap domino %d-%d", candidate.Domino.Square1Value, candidate.Domino.Square2Value),
+					Domino:     candidate.Domino,
+					GridSquare: emptySquare,
+					MoveType:   MoveTypeSwap,
+				}
+				moveQueue.TryPush(move)
+				defer func() {
+					if !success {
+						moveQueue.Pop()
+					}
+				}()
+			}
 			move := &Move{
 				Label:      fmt.Sprintf("Assign domino %d-%d to square %d,%d", candidate.Domino.Square1Value, candidate.Domino.Square2Value, emptySquare.X+1, emptySquare.Y+1),
 				Domino:     candidate.Domino,
@@ -123,15 +146,20 @@ func makeNextMove(grid [][]*GridSquare, dominoes DominoSet, moveQueue *MoveQueue
 			}
 			// We were able to place this domino in its current state, try to make another move
 			if moveQueue.TryPush(move) {
-				if success := makeNextMove(grid, dominoes, moveQueue, pickEmptySquare(grid)); success {
+				emptySquare = pickEmptySquare(grid)
+				if emptySquare == nil && !dominoes.HasUnassigned() {
+					// base return condition: no empty squares left, puzzle solved
+					return true
+				}
+				if success := makeNextMove(grid, dominoes, moveQueue, emptySquare); success {
 					// success condition: puzzle solved from this current state
 					return true
-				} else {
-					// failure condition: no valid next move can be made from this new state, undo the move and try the next candidate state
-					moveQueue.Pop()
 				}
+
+				// failure condition: no valid next move can be made from this new state, undo the move and try the next candidate state
+				moveQueue.Pop()
 			}
-			// Try the next orientation
+
 			move = &Move{
 				Label:      fmt.Sprintf("Rotate domino %d-%d", candidate.Domino.Square1Value, candidate.Domino.Square2Value),
 				Domino:     candidate.Domino,
@@ -230,7 +258,6 @@ func parseRestrictedRegion(input string, grid [][]*GridSquare) {
 		parts = parts[1:]
 	case "eq":
 		restriction.Type = RestrictionTypeEqual
-		parts = parts[1:]
 	}
 	for i := 0; i < len(parts); i += 2 {
 		x, err := strconv.Atoi(parts[i])
@@ -245,7 +272,7 @@ func parseRestrictedRegion(input string, grid [][]*GridSquare) {
 		y--
 		fmt.Println("Adding restriction to grid square", x, y)
 		grid[y][x].Restriction = restriction
-		restriction.NumSquaresAffected++
+		restriction.NumSquaresLeft++
 	}
 }
 
@@ -296,15 +323,19 @@ func pickEmptySquare(grid [][]*GridSquare) *GridSquare {
 			if grid[y][x] == nil {
 				continue
 			}
-			if grid[y][x].DominoAssigned == nil && grid[y][x].Restriction != nil {
+			if grid[y][x].DominoAssigned == nil && grid[y][x].Restriction.Type != RestrictionTypeNone {
 				blankSquares = append(blankSquares, grid[y][x])
 			}
 		}
 	}
 
+	if len(blankSquares) == 0 {
+		return nil
+	}
+
 	// First try to find one with a single-square sum restriction
 	for _, square := range blankSquares {
-		if square.Restriction.Type == RestrictionTypeSumsTo && square.Restriction.NumSquaresAffected == 1 {
+		if square.Restriction.Type == RestrictionTypeSumsTo && square.Restriction.NumSquaresLeft == 1 {
 			return square
 		}
 	}

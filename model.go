@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 // Gridsquare represents a single square on the grid and all the metadata associated with it, including its logical restrictions
 type GridSquare struct {
 	X int
@@ -24,10 +26,10 @@ type Restriction struct {
 	// sum: blank initial value (-1), will be modified by the domino assignment
 	Arg int
 
-	NumSquaresAffected int
+	NumSquaresLeft int
 }
 
-func (r *Restriction) Check(value int) bool {
+func (r *Restriction) Check(value int, numSquares int) bool {
 	switch r.Type {
 	case RestrictionTypeNone:
 		return true
@@ -38,7 +40,13 @@ func (r *Restriction) Check(value int) bool {
 	case RestrictionTypeEqual:
 		return r.Arg == -1 || value == r.Arg
 	case RestrictionTypeSumsTo:
-		return r.Arg-value >= 0
+		if r.Arg-value < 0 {
+			return false
+		}
+		if r.NumSquaresLeft == numSquares && value != r.Arg {
+			return false
+		}
+		return true
 	}
 	return false
 }
@@ -86,6 +94,7 @@ func (d *Domino) Swap() {
 // Possible move, returns its own undo action depending on what was done during placement
 func (d *Domino) Assign(s *GridSquare, neighbor *GridSquare) func() {
 	s.DominoAssigned = d
+	neighbor.DominoAssigned = d
 	wasBlank, neighborWasBlank := false, false
 	if s.Restriction.Type == RestrictionTypeEqual {
 		if s.Restriction.Arg == -1 {
@@ -101,9 +110,11 @@ func (d *Domino) Assign(s *GridSquare, neighbor *GridSquare) func() {
 	}
 	if s.Restriction.Type == RestrictionTypeSumsTo {
 		s.Restriction.Arg -= d.Square1Value
+		s.Restriction.NumSquaresLeft--
 	}
 	if neighbor.Restriction.Type == RestrictionTypeSumsTo {
 		neighbor.Restriction.Arg -= d.Square2Value
+		neighbor.Restriction.NumSquaresLeft--
 	}
 
 	d.IsAssigned = true
@@ -111,6 +122,7 @@ func (d *Domino) Assign(s *GridSquare, neighbor *GridSquare) func() {
 	undoFunc := func() {
 		s.DominoAssigned = nil
 		d.IsAssigned = false
+		neighbor.DominoAssigned = nil
 		if wasBlank {
 			s.Restriction.Arg = -1
 		}
@@ -119,9 +131,11 @@ func (d *Domino) Assign(s *GridSquare, neighbor *GridSquare) func() {
 		}
 		if s.Restriction.Type == RestrictionTypeSumsTo {
 			s.Restriction.Arg += d.Square1Value
+			s.Restriction.NumSquaresLeft++
 		}
 		if neighbor.Restriction.Type == RestrictionTypeSumsTo {
 			neighbor.Restriction.Arg += d.Square2Value
+			neighbor.Restriction.NumSquaresLeft++
 		}
 	}
 
@@ -155,22 +169,20 @@ func (d *Domino) TryAssign(s *GridSquare) (bool, func()) {
 			if d.Square1Value != d.Square1Value {
 				return false, nil
 			}
-			if !s.Restriction.Check(d.Square1Value) {
+			if !s.Restriction.Check(d.Square1Value, 1) {
 				return false, nil
 			}
 		}
 		if s.Restriction.Type == RestrictionTypeSumsTo {
 			sumOfDomino := d.Square1Value + d.Square2Value
-			if !s.Restriction.Check(sumOfDomino) {
+			if !s.Restriction.Check(sumOfDomino, 2) {
 				return false, nil
 			}
 		}
 	} else {
 		// Only check neighbor, we already checked the current square during candidate selection
-		if neighbor.Restriction != nil {
-			if !neighbor.Restriction.Check(d.Square2Value) {
-				return false, nil
-			}
+		if !neighbor.Restriction.Check(d.Square2Value, 1) {
+			return false, nil
 		}
 	}
 
@@ -186,6 +198,8 @@ type Move struct {
 	GridSquare *GridSquare
 	MoveType   MoveType
 	UndoFunc   func()
+
+	Pruned bool
 }
 
 type MoveType string
@@ -203,10 +217,12 @@ func (q *MoveQueue) TryPush(m *Move) bool {
 	case MoveTypeRotate:
 		m.Domino.Rotate90DegreesClockwise()
 		m.UndoFunc = m.Domino.Rotate90DegreesCounterClockwise
+		*q = append(*q, m)
 		return true
 	case MoveTypeSwap:
 		m.Domino.Swap()
 		m.UndoFunc = m.Domino.Swap
+		*q = append(*q, m)
 		return true
 	case MoveTypeAssign:
 		success, undoFunc := m.Domino.TryAssign(m.GridSquare)
@@ -230,6 +246,40 @@ func (q *MoveQueue) Pop() *Move {
 	return m
 }
 
+func (q *MoveQueue) String() string {
+	s := "Move queue:\n"
+	for _, m := range *q {
+		if !m.Pruned {
+			s += fmt.Sprintf("  - %s\n", m.Label)
+		}
+	}
+	return s
+}
+
+// My code structure is funky and allows for quadruple rotates not resulting not in a placement
+// I am too lazy to change things right now so instead lets just prune them
+// If there are four consecutive rotates of the same domino followed NOT by a placement move of that domino, remove all four rotates
+func (q *MoveQueue) PruneUselessMoves() {
+	firstRotateIndex := 0
+	firstRotateMove := (*q)[0]
+	for i := 1; i < len(*q); i++ {
+		if (*q)[i].MoveType == MoveTypeRotate {
+			if firstRotateMove.Domino != (*q)[i].Domino {
+				firstRotateIndex = i
+				firstRotateMove = (*q)[i]
+			} else {
+				if i-firstRotateIndex == 3 && !((*q)[i+1].MoveType == MoveTypeAssign && (*q)[i+1].Domino == firstRotateMove.Domino) {
+					for j := firstRotateIndex; j <= i; j++ {
+						(*q)[j].Pruned = true
+					}
+					firstRotateIndex = i + 1
+					firstRotateMove = (*q)[firstRotateIndex]
+				}
+			}
+		}
+	}
+}
+
 type DominoCandidate struct {
 	Domino       *Domino
 	isLeftMatch  bool
@@ -245,12 +295,21 @@ func (ds *DominoSet) FindAvailableCandidates(square *GridSquare) []*DominoCandid
 			continue
 		}
 
-		leftMatch := square.Restriction.Check(domino.Square1Value)
-		rightMatch := square.Restriction.Check(domino.Square2Value)
+		leftMatch := square.Restriction.Check(domino.Square1Value, 1)
+		rightMatch := square.Restriction.Check(domino.Square2Value, 1)
 		if !leftMatch && !rightMatch {
 			continue
 		}
 		available = append(available, &DominoCandidate{Domino: domino, isLeftMatch: leftMatch, isRightMatch: rightMatch})
 	}
 	return available
+}
+
+func (ds *DominoSet) HasUnassigned() bool {
+	for _, domino := range *ds {
+		if !domino.IsAssigned {
+			return true
+		}
+	}
+	return false
 }
